@@ -47,7 +47,7 @@ def main():
             page_counter += 1
 
         if not results:
-            # Pront info in CLI if there was no results
+            # Print info in CLI if there was no results
             print("There is no provided text inside PDF file.")
         elif results and args.output:
             # Save results to file if there was -o argument provided
@@ -55,7 +55,7 @@ def main():
                 file.write('\n'.join(_ for _ in results) + "\n")
             file.close()
         else:
-            # Pront results in CLI
+            # Print results in CLI
             for _ in results:
                 print(_)
 
