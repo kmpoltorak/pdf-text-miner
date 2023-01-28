@@ -9,7 +9,7 @@ from PyPDF2 import PdfReader, errors
 
 def main():
     """ A script that reads PDF and searches inside provided text. For sentences use double quotes after -t. """
-    
+
     # Parse arguments from CLI
     parser = argparse.ArgumentParser(description="Search text in PDF file")
     parser.add_argument('-f', '--filename', help="provide PDF filename (with directory if different)", required=True)
@@ -22,7 +22,7 @@ def main():
     if not os.path.exists(args.filename):
         print("File not found in provided directory.")
         sys.exit()
-    
+
     try:
         # Read PDF file if posible and check amount of pages
         reader = PdfReader(args.filename)
@@ -62,7 +62,7 @@ def main():
     except errors.EmptyFileError:
         print("Provided file is empty")
     except errors.PdfReadError:
-        print("Can't PDF read file")
+        print("Can't read PDF file")
 
 # Run the script
 if __name__ == "__main__":
