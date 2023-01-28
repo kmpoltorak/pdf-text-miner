@@ -1,5 +1,5 @@
 # Overview
-A script that reads PDF and searches inside provided text or sentences in doublequotes.
+A script that reads PDF and searches inside provided text or sentences in double quotes
 
 # Prerequirements
 * Install Python3
