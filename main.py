@@ -51,9 +51,8 @@ def main():
             print("There is no provided text inside PDF file.")
         elif results and args.output:
             # Save results to file if there was -o argument provided
-            with open("results.txt", "w", encoding="utf-8") as file:
-                file.write('\n'.join(_ for _ in results) + "\n")
-            file.close()
+            with open("results.txt", "w", encoding="utf-8") as f:
+                f.write('\n'.join(_ for _ in results) + "\n")
         else:
             # Print results in CLI
             for _ in results:
