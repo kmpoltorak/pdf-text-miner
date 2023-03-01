@@ -40,7 +40,7 @@ def main():
             if args.capitalisation:
                 args.text = args.text.lower()
                 page_text = page_text.lower()
-            # Verify given page is there given test and if yes what is thew ocurence
+            # Verify given page is there given text and if yes what is thew occurrence
             if args.text in page_text:
                 text_occurence = page_text.count(args.text)
                 results.append(f"Searched text exist {text_occurence} times on page {page_counter+1}.")
