@@ -3,66 +3,78 @@
 import argparse
 import os
 import sys
+from typing import List
 
-from PyPDF2 import PdfReader, errors
+# Prefer `pypdf` (successor of PyPDF2). Fall back to legacy `PyPDF2` for compatibility if `pypdf` isn't installed.
+from pypdf import PdfReader, errors
+
+
+def search_in_pdf(filename: str, text: str, ignore_case: bool = False) -> List[str]:
+    """Search `text` inside `filename` PDF and return a list of result strings per page.
+
+    Raises FileNotFoundError when file does not exist.
+    """
+    if not os.path.exists(filename):
+        raise FileNotFoundError(filename)
+
+    reader = PdfReader(filename)
+    total_pages = len(reader.pages)
+    results: List[str] = []
+
+    # Prepare search text depending on case sensitivity
+    search_text = text.lower() if ignore_case else text
+
+    for i in range(total_pages):
+        page = reader.pages[i]
+        page_text = page.extract_text()
+        if not page_text:
+            # Skip pages without extractable text
+            continue
+        # Normalize whitespace and strip each line
+        page_text = " ".join(line.strip() for line in page_text.splitlines())
+        page_search_text = page_text.lower() if ignore_case else page_text
+        if search_text in page_search_text:
+            count = page_search_text.count(search_text)
+            results.append(f"Searched text exists {count} times on page {i+1}.")
+
+    return results
 
 
 def main():
-    """ A script that reads PDF and searches inside provided text. For sentences use double quotes after -t. """
+    """CLI entrypoint for searching text in a PDF file.
 
-    # Parse arguments from CLI
+    Notes: wrap multi-word search text in quotes when calling from the shell.
+    """
     parser = argparse.ArgumentParser(description="Search text in PDF file")
     parser.add_argument('-f', '--filename', help="provide PDF filename (with directory if different)", required=True)
     parser.add_argument('-t', '--text', help="provide text to search in PDF file", required=True)
     parser.add_argument('-o', '--output', action='store_true', help="save script output to results.txt file")
-    parser.add_argument('-c', '--capitalisation', action='store_true', help="skips letter capitalization for non-specific search")
+    parser.add_argument('-c', '--capitalisation', action='store_true', help="ignore letter capitalization for search")
     args = parser.parse_args()
 
-    # Check if the provided pdf file exists
-    if not os.path.exists(args.filename):
-        print("File not found in provided directory.")
-        sys.exit()
-
     try:
-        # Read PDF file if posible and check amount of pages
-        reader = PdfReader(args.filename)
-        total_pages = len(reader.pages)
-        page_counter = 0
-        results = []
-        # Check provided text in file page by page
-        while page_counter < total_pages:
-            page = reader.pages[page_counter]
-            # Load full text from given page
-            page_text = page.extract_text()
-            # Rewrite given page text to one line
-            page_text = " ".join(line.strip() for line in page_text.splitlines())
-            # Skip letter capitalisation if -c argument was provided
-            if args.capitalisation:
-                args.text = args.text.lower()
-                page_text = page_text.lower()
-            # Verify given page is there given text and if yes what is thew occurrence
-            if args.text in page_text:
-                text_occurrence = page_text.count(args.text)
-                results.append(f"Searched text exist {text_occurrence} times on page {page_counter+1}.")
-            page_counter += 1
+        results = search_in_pdf(args.filename, args.text, ignore_case=args.capitalisation)
 
         if not results:
-            # Print info in CLI if there was no results
             print("There is no provided text inside PDF file.")
         elif results and args.output:
-            # Save results to file if there was -o argument provided
             with open("results.txt", "w", encoding="utf-8") as f:
-                f.write('\n'.join(_ for _ in results) + "\n")
+                f.write('\n'.join(results) + "\n")
         else:
-            # Print results in CLI
-            for _ in results:
-                print(_)
+            for line in results:
+                print(line)
 
     except errors.EmptyFileError:
         print("Provided file is empty")
+        sys.exit(1)
     except errors.PdfReadError:
         print("Can't read PDF file")
+        sys.exit(2)
+    except FileNotFoundError:
+        print("File not found in provided directory.")
+        sys.exit(3)
 
-# Run the script
+
 if __name__ == "__main__":
     main()
+
