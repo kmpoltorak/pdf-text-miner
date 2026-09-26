@@ -16,16 +16,18 @@ Search semantics:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import logging
 import os
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from pypdf import PdfReader, errors
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 DEFAULT_OUTPUT_FILE = "results.txt"
 NO_MATCHES_MESSAGE = "No matches found."
@@ -38,6 +40,10 @@ EXIT_NOT_FOUND = 3  # the input path does not exist or is a directory
 EXIT_ENCRYPTED = 4  # the PDF is encrypted and cannot be opened without a password
 EXIT_IO_ERROR = 5  # reading the input or writing the output failed (e.g. permissions)
 EXIT_USAGE = 6  # invalid command-line arguments
+
+# Built-in exceptions that pypdf lets escape on malformed page content (e.g. an
+# operator without its operands); they are reported as an invalid PDF.
+_MALFORMED_PDF_ERRORS = (IndexError, KeyError, TypeError, ValueError)
 
 
 @dataclass(frozen=True)
@@ -61,7 +67,8 @@ def find_matches(filename: str | os.PathLike[str], text: str, ignore_case: bool 
         FileNotFoundError: ``filename`` does not exist.
         IsADirectoryError: ``filename`` is a directory.
         OSError: the file cannot be read (e.g. permission denied).
-        pypdf.errors.PyPdfError: the file is not a valid PDF or is encrypted.
+        pypdf.errors.PyPdfError: the file is not a valid PDF or is encrypted; malformed
+            content that makes pypdf raise a built-in error is re-raised as ``PdfReadError``.
     """
     needle = normalize_whitespace(text)
     if not needle:
@@ -78,15 +85,18 @@ def find_matches(filename: str | os.PathLike[str], text: str, ignore_case: bool 
     matches: list[PageMatch] = []
     # pypdf reads lazily, so all extraction must happen while the file is open.
     with open(path, "rb") as stream:
-        reader = PdfReader(stream)
-        for page_number, page in enumerate(reader.pages, start=1):
-            # Pages without a text layer (e.g. scans) yield "" and simply never match.
-            haystack = normalize_whitespace(page.extract_text() or "")
-            if ignore_case:
-                haystack = haystack.casefold()
-            count = haystack.count(needle)
-            if count:
-                matches.append(PageMatch(page_number, count))
+        try:
+            reader = PdfReader(stream)
+            for page_number, page in enumerate(reader.pages, start=1):
+                # Pages without a text layer (e.g. scans) yield "" and simply never match.
+                haystack = normalize_whitespace(page.extract_text() or "")
+                if ignore_case:
+                    haystack = haystack.casefold()
+                count = haystack.count(needle)
+                if count:
+                    matches.append(PageMatch(page_number, count))
+        except _MALFORMED_PDF_ERRORS as exc:
+            raise errors.PdfReadError(f"malformed PDF content: {exc}") from exc
     return matches
 
 
@@ -152,6 +162,30 @@ def _is_same_file(first: str, second: str) -> bool:
     return os.path.exists(first) and os.path.exists(second) and os.path.samefile(first, second)
 
 
+def _write_atomically(path: str, content: str) -> None:
+    """Replace ``path`` with ``content`` only once it has been written completely.
+
+    If writing fails, the previous file is left untouched and the temporary file is
+    removed. A symlink is followed, so the link survives and its target is replaced;
+    an existing file keeps its permission bits.
+    """
+    if not path:
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path)
+    target = os.path.realpath(path)
+    temp = f"{target}.{os.getpid()}.tmp"
+    try:
+        # "x" never clobbers an existing file; the new file gets the usual umask-based mode.
+        with open(temp, "x", encoding="utf-8") as output:
+            output.write(content)
+        if os.path.exists(target):
+            shutil.copymode(target, temp)
+        os.replace(temp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(temp)
+        raise
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the CLI and return its exit code; ``argv`` defaults to ``sys.argv[1:]``."""
     parser = build_parser()
@@ -162,9 +196,18 @@ def main(argv: list[str] | None = None) -> int:
         return exc.code if isinstance(exc.code, int) else EXIT_USAGE
 
     # pypdf logs recoverable parsing problems as warnings; in the CLI they would only
-    # clutter stderr next to our own message. Library users keep pypdf's defaults.
-    logging.getLogger("pypdf").setLevel(logging.ERROR)
+    # clutter stderr next to our own message. The previous level is restored so that
+    # callers of main() in the same process keep their logging configuration.
+    pypdf_logger = logging.getLogger("pypdf")
+    previous_level = pypdf_logger.level
+    pypdf_logger.setLevel(logging.ERROR)
+    try:
+        return _run(parser, args)
+    finally:
+        pypdf_logger.setLevel(previous_level)
 
+
+def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     def fail(code: int, message: str) -> int:
         print(f"{parser.prog}: error: {message}", file=sys.stderr)
         return code
@@ -187,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
         return fail(EXIT_NOT_FOUND, f"not a file: {args.filename}")
     except OSError as exc:
         return fail(EXIT_IO_ERROR, f"cannot read {args.filename}: {exc.strerror or exc}")
-    # Order matters: both subclass PdfReadError, which is handled after them.
+    # Order matters: both subclass PyPdfError, which is handled after them.
     except errors.EmptyFileError:
         return fail(EXIT_EMPTY_FILE, f"file is empty: {args.filename}")
     except errors.FileNotDecryptedError:
@@ -195,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     except errors.DependencyError as exc:
         # AES-encrypted PDFs need an extra crypto package: pip install "pypdf[crypto]".
         return fail(EXIT_ENCRYPTED, f"cannot decrypt {args.filename}: {exc}")
-    except errors.PdfReadError as exc:
+    except errors.PyPdfError as exc:
         return fail(EXIT_INVALID_PDF, f"cannot read PDF {args.filename}: {exc}")
 
     lines = [format_match(match) for match in matches] or [NO_MATCHES_MESSAGE]
@@ -206,8 +249,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Always write the file, even with no matches, so a previous run's results never linger.
     try:
-        with open(output_path, "w", encoding="utf-8") as output:
-            output.write("\n".join(lines) + "\n")
+        _write_atomically(output_path, "\n".join(lines) + "\n")
     except OSError as exc:
         return fail(EXIT_IO_ERROR, f"cannot write {output_path}: {exc.strerror or exc}")
     print(f"Results saved to {output_path}.")

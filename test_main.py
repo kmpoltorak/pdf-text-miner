@@ -1,9 +1,11 @@
+import errno
+import logging
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from pypdf import PdfWriter
+from pypdf import PageObject, PdfWriter
 from reportlab.pdfgen import canvas
 
 import main
@@ -211,6 +213,26 @@ def test_cli_corrupted_pdf(capsys, tmp_path, content):
     assert "Traceback" not in err
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        # What older pypdf versions (e.g. 6.5) raise for `Td` without operands and for
+        # non-numeric operands of `"`; newer versions tolerate both, so the error is simulated.
+        IndexError("list index out of range"),
+        ValueError("could not convert string to float: b'hello'"),
+    ],
+)
+def test_cli_malformed_page_content(capsys, monkeypatch, sample_pdf, error):
+    def broken_extract_text(self, *args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(PageObject, "extract_text", broken_extract_text)
+    code, out, err = _run(capsys, "-f", str(sample_pdf), "-t", "hello")
+    assert (code, out) == (ptm.EXIT_INVALID_PDF, "")
+    assert "cannot read PDF" in err
+    assert "Traceback" not in err
+
+
 def test_cli_password_protected_pdf(capsys, tmp_path, sample_pdf):
     encrypted = tmp_path / "encrypted.pdf"
     _encrypt(sample_pdf, encrypted, user_password="secret")
@@ -311,7 +333,7 @@ def test_cli_output_permission_denied(capsys, monkeypatch, tmp_path, sample_pdf)
     real_open = open
 
     def deny_writes(file, mode="r", *args, **kwargs):
-        if "w" in mode:
+        if "w" in mode or "x" in mode:
             raise PermissionError(13, "Permission denied")
         return real_open(file, mode, *args, **kwargs)
 
@@ -320,6 +342,77 @@ def test_cli_output_permission_denied(capsys, monkeypatch, tmp_path, sample_pdf)
     code, _, err = _run(capsys, "-f", str(sample_pdf), "-t", "hello", "-o")
     assert code == ptm.EXIT_IO_ERROR
     assert "Permission denied" in err
+
+
+class _FailingFile:
+    """Wraps a real file opened for writing and makes `write` or `close` fail with ENOSPC."""
+
+    def __init__(self, file, fail_on):
+        self._file = file
+        self._fail_on = fail_on
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+
+    def write(self, data):
+        if self._fail_on == "write":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return self._file.write(data)
+
+    def close(self):
+        self._file.close()
+        if self._fail_on == "close":
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+
+@pytest.mark.parametrize("fail_on", ["write", "close"])
+def test_cli_failed_write_keeps_previous_results(capsys, monkeypatch, tmp_path, sample_pdf, fail_on):
+    target = tmp_path / "results.txt"
+    target.write_text("previous valid results\n", encoding="utf-8")
+    real_open = open
+
+    def failing_open(file, mode="r", *args, **kwargs):
+        opened = real_open(file, mode, *args, **kwargs)
+        return _FailingFile(opened, fail_on) if "x" in mode or "w" in mode else opened
+
+    monkeypatch.setattr(ptm, "open", failing_open, raising=False)
+    code, out, err = _run(capsys, "-f", str(sample_pdf), "-t", "hello", "--output-path", str(target))
+    assert (code, out) == (ptm.EXIT_IO_ERROR, "")
+    assert "No space left on device" in err
+    assert target.read_text(encoding="utf-8") == "previous valid results\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["results.txt", "sample.pdf"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="creating symlinks needs extra privileges on Windows")
+def test_cli_output_symlink_is_kept_and_target_updated(capsys, tmp_path, sample_pdf):
+    real = tmp_path / "real.txt"
+    real.write_text("old\n", encoding="utf-8")
+    real.chmod(0o640)
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    code, _, _ = _run(capsys, "-f", str(sample_pdf), "-t", "HELLO", "--output-path", str(link))
+    assert code == ptm.EXIT_OK
+    assert link.is_symlink()
+    assert real.read_text(encoding="utf-8") == "Searched text exists 1 times on page 4.\n"
+    assert real.stat().st_mode & 0o777 == 0o640
+
+
+# --- logging ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pattern", ["hello", "   "])  # success and a usage error
+def test_main_restores_pypdf_logger_level(capsys, sample_pdf, pattern):
+    logger = logging.getLogger("pypdf")
+    previous = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        ptm.main(["-f", str(sample_pdf), "-t", pattern])
+        assert logger.level == logging.WARNING
+    finally:
+        logger.setLevel(previous)
 
 
 # --- entry points -------------------------------------------------------------
