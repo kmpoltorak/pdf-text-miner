@@ -1,9 +1,12 @@
+import errno
+import logging
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, NameObject
 from reportlab.pdfgen import canvas
 
 import main
@@ -34,6 +37,16 @@ def _encrypt(source: Path, target: Path, user_password: str) -> None:
     writer = PdfWriter(clone_from=source)
     writer.encrypt(user_password=user_password, owner_password="owner", algorithm="RC4-128")
     writer.write(target)
+
+
+def _write_raw_page(path: Path, content: bytes) -> None:
+    """Write a structurally valid PDF whose only page has the raw content stream `content`."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=200, height=200)
+    stream = DecodedStreamObject()
+    stream.set_data(content)
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    writer.write(path)
 
 
 def _run(capsys, *argv: str) -> tuple[int, str, str]:
@@ -211,6 +224,22 @@ def test_cli_corrupted_pdf(capsys, tmp_path, content):
     assert "Traceback" not in err
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"BT /F1 12 Tf (hello) Tj Td ET",  # Td without operands: pypdf raises IndexError
+        b'BT /F1 12 Tf (hello) " ET',  # bad operands of ": pypdf raises ValueError
+    ],
+)
+def test_cli_malformed_page_content(capsys, tmp_path, content):
+    broken = tmp_path / "broken-stream.pdf"
+    _write_raw_page(broken, content)
+    code, out, err = _run(capsys, "-f", str(broken), "-t", "hello")
+    assert (code, out) == (ptm.EXIT_INVALID_PDF, "")
+    assert "cannot read PDF" in err
+    assert "Traceback" not in err
+
+
 def test_cli_password_protected_pdf(capsys, tmp_path, sample_pdf):
     encrypted = tmp_path / "encrypted.pdf"
     _encrypt(sample_pdf, encrypted, user_password="secret")
@@ -311,7 +340,7 @@ def test_cli_output_permission_denied(capsys, monkeypatch, tmp_path, sample_pdf)
     real_open = open
 
     def deny_writes(file, mode="r", *args, **kwargs):
-        if "w" in mode:
+        if "w" in mode or "x" in mode:
             raise PermissionError(13, "Permission denied")
         return real_open(file, mode, *args, **kwargs)
 
@@ -320,6 +349,77 @@ def test_cli_output_permission_denied(capsys, monkeypatch, tmp_path, sample_pdf)
     code, _, err = _run(capsys, "-f", str(sample_pdf), "-t", "hello", "-o")
     assert code == ptm.EXIT_IO_ERROR
     assert "Permission denied" in err
+
+
+class _FailingFile:
+    """Wraps a real file opened for writing and makes `write` or `close` fail with ENOSPC."""
+
+    def __init__(self, file, fail_on):
+        self._file = file
+        self._fail_on = fail_on
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+
+    def write(self, data):
+        if self._fail_on == "write":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return self._file.write(data)
+
+    def close(self):
+        self._file.close()
+        if self._fail_on == "close":
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+
+@pytest.mark.parametrize("fail_on", ["write", "close"])
+def test_cli_failed_write_keeps_previous_results(capsys, monkeypatch, tmp_path, sample_pdf, fail_on):
+    target = tmp_path / "results.txt"
+    target.write_text("previous valid results\n", encoding="utf-8")
+    real_open = open
+
+    def failing_open(file, mode="r", *args, **kwargs):
+        opened = real_open(file, mode, *args, **kwargs)
+        return _FailingFile(opened, fail_on) if "x" in mode or "w" in mode else opened
+
+    monkeypatch.setattr(ptm, "open", failing_open, raising=False)
+    code, out, err = _run(capsys, "-f", str(sample_pdf), "-t", "hello", "--output-path", str(target))
+    assert (code, out) == (ptm.EXIT_IO_ERROR, "")
+    assert "No space left on device" in err
+    assert target.read_text(encoding="utf-8") == "previous valid results\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["results.txt", "sample.pdf"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="creating symlinks needs extra privileges on Windows")
+def test_cli_output_symlink_is_kept_and_target_updated(capsys, tmp_path, sample_pdf):
+    real = tmp_path / "real.txt"
+    real.write_text("old\n", encoding="utf-8")
+    real.chmod(0o640)
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    code, _, _ = _run(capsys, "-f", str(sample_pdf), "-t", "HELLO", "--output-path", str(link))
+    assert code == ptm.EXIT_OK
+    assert link.is_symlink()
+    assert real.read_text(encoding="utf-8") == "Searched text exists 1 times on page 4.\n"
+    assert real.stat().st_mode & 0o777 == 0o640
+
+
+# --- logging ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pattern", ["hello", "   "])  # success and a usage error
+def test_main_restores_pypdf_logger_level(capsys, sample_pdf, pattern):
+    logger = logging.getLogger("pypdf")
+    previous = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        ptm.main(["-f", str(sample_pdf), "-t", pattern])
+        assert logger.level == logging.WARNING
+    finally:
+        logger.setLevel(previous)
 
 
 # --- entry points -------------------------------------------------------------

@@ -54,3 +54,26 @@ jobs:
 
       - name: Smoke-test installed command
         run: pdf-text-miner -f lorem-ipsum.pdf -t "lorem ipsum" --ignore-case
+
+  wheel:
+    # The test job installs the checkout in editable mode; this checks the real distribution.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Build wheel
+        run: python -m pip wheel --no-deps --wheel-dir dist .
+
+      - name: Install wheel in a clean environment and run it outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -m venv venv
+          venv/bin/python -m pip install "$GITHUB_WORKSPACE"/dist/*.whl
+          venv/bin/pdf-text-miner --version
+          venv/bin/pdf-text-miner -f "$GITHUB_WORKSPACE/lorem-ipsum.pdf" -t "lorem ipsum" --ignore-case

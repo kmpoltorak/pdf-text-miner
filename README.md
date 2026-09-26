@@ -87,13 +87,20 @@ The file is always overwritten. If nothing is found, it contains `No matches fou
 so results from an earlier run never remain. The tool refuses to write the results over
 the input PDF.
 
+The results are first written to a temporary file next to the target, which then replaces
+the target only after a complete write. If writing fails (for example, the disk is full),
+the command exits with code 5, the previous file is left unchanged and the temporary file
+is removed. If `PATH` is a symbolic link, the link is kept and the file it points to is
+replaced. An existing file keeps its permissions. A hard link to it is not updated,
+because the target is replaced by a new file.
+
 ### Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | Search finished (also when no matches were found). |
 | 1 | The input file is empty. |
-| 2 | The input file is not a readable PDF (corrupted or not a PDF). |
+| 2 | The input file is not a readable PDF (corrupted, not a PDF, or with malformed page content). |
 | 3 | The input file does not exist or is not a file (e.g. a directory). |
 | 4 | The PDF is encrypted and needs a password. |
 | 5 | Reading the input or writing the results failed (e.g. permission denied). |
@@ -125,6 +132,13 @@ for match in find_matches("example.pdf", "Test text", ignore_case=True):
 `search_in_pdf(filename, text, ignore_case=False)` still returns the formatted lines
 (`"Searched text exists N times on page P."`) for backward compatibility.
 
+`find_matches` raises `ValueError` only for an empty or whitespace-only phrase. Problems
+with the document are raised as `pypdf.errors.PyPdfError`; built-in errors that pypdf
+raises on malformed page content are re-raised as `pypdf.errors.PdfReadError`.
+
+`main(argv)` runs the CLI in-process and returns its exit code. It lowers the level of the
+`pypdf` logger to `ERROR` while it runs and restores the previous level afterwards.
+
 ## Development
 
 ```bash
@@ -143,7 +157,9 @@ development tools (pytest, ReportLab, Ruff) are in the `dev` extra.
 ## Continuous Integration
 
 The GitHub Actions workflow in `.github/workflows/pytest.yml` runs Ruff (lint and format
-check) and the test suite on Python 3.10–3.14 for every push and pull request.
+check) and the test suite on Python 3.10–3.14 for every push and pull request. A separate
+job builds the wheel, installs it into a clean virtual environment and runs the installed
+command outside the source directory.
 
 ## License
 
