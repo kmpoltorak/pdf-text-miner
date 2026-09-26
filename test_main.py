@@ -5,8 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from pypdf import PdfWriter
-from pypdf.generic import DecodedStreamObject, NameObject
+from pypdf import PageObject, PdfWriter
 from reportlab.pdfgen import canvas
 
 import main
@@ -37,16 +36,6 @@ def _encrypt(source: Path, target: Path, user_password: str) -> None:
     writer = PdfWriter(clone_from=source)
     writer.encrypt(user_password=user_password, owner_password="owner", algorithm="RC4-128")
     writer.write(target)
-
-
-def _write_raw_page(path: Path, content: bytes) -> None:
-    """Write a structurally valid PDF whose only page has the raw content stream `content`."""
-    writer = PdfWriter()
-    page = writer.add_blank_page(width=200, height=200)
-    stream = DecodedStreamObject()
-    stream.set_data(content)
-    page[NameObject("/Contents")] = writer._add_object(stream)
-    writer.write(path)
 
 
 def _run(capsys, *argv: str) -> tuple[int, str, str]:
@@ -225,16 +214,20 @@ def test_cli_corrupted_pdf(capsys, tmp_path, content):
 
 
 @pytest.mark.parametrize(
-    "content",
+    "error",
     [
-        b"BT /F1 12 Tf (hello) Tj Td ET",  # Td without operands: pypdf raises IndexError
-        b'BT /F1 12 Tf (hello) " ET',  # bad operands of ": pypdf raises ValueError
+        # What older pypdf versions (e.g. 6.5) raise for `Td` without operands and for
+        # non-numeric operands of `"`; newer versions tolerate both, so the error is simulated.
+        IndexError("list index out of range"),
+        ValueError("could not convert string to float: b'hello'"),
     ],
 )
-def test_cli_malformed_page_content(capsys, tmp_path, content):
-    broken = tmp_path / "broken-stream.pdf"
-    _write_raw_page(broken, content)
-    code, out, err = _run(capsys, "-f", str(broken), "-t", "hello")
+def test_cli_malformed_page_content(capsys, monkeypatch, sample_pdf, error):
+    def broken_extract_text(self, *args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(PageObject, "extract_text", broken_extract_text)
+    code, out, err = _run(capsys, "-f", str(sample_pdf), "-t", "hello")
     assert (code, out) == (ptm.EXIT_INVALID_PDF, "")
     assert "cannot read PDF" in err
     assert "Traceback" not in err
