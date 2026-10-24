@@ -2,16 +2,21 @@
 
 # pdf-text-miner
 
-A small command-line tool that searches for a phrase in a PDF file and reports how many
-times it occurs on each page.
+A small command-line tool that searches a PDF for a phrase and reports how many
+times it occurs on each page. It works on the PDF's text layer, so it is for
+born-digital PDFs, not scans.
 
 ```console
-$ pdf-text-miner -f report.pdf -t "net revenue" --ignore-case
-Searched text exists 2 times on page 1.
-Searched text exists 1 times on page 7.
+$ pdf-text-miner -f lorem-ipsum.pdf -t "lorem" -c
+Searched text exists 7 times on page 1.
 ```
 
-## Installation
+- A phrase that wraps onto the next line is still found: whitespace is normalized the same way in the PDF and in the phrase.
+- Every failure exits with its own code and a one-line message on stderr: empty file, not a PDF, missing file, encrypted, I/O error, bad arguments.
+- Results are written to a temporary file and renamed into place, so a failed write leaves the previous file unchanged.
+- The tool refuses to write results over the input PDF.
+
+## Install
 
 Requires Python 3.10 or newer.
 
@@ -19,20 +24,17 @@ Requires Python 3.10 or newer.
 pip install git+https://github.com/kmpoltorak/pdf-text-miner.git
 ```
 
-This installs the `pdf-text-miner` command, which is used in all examples below. It is a
-command on your `PATH`, not a Python file: run it as `pdf-text-miner ...`, not as
-`python pdf-text-miner.py ...`.
+This installs the `pdf-text-miner` command on your `PATH`. From a checkout,
+`pip install .` does the same, or run `python main.py ...` with only `pypdf`
+installed.
 
-From a local checkout you have two options:
+## Quick start
 
 ```bash
-# Install the command from the checkout (inside a virtual environment)
-pip install .
-pdf-text-miner -f example.pdf -t "Test text"
-
-# Or run the script directly without installing it; only pypdf is needed
-pip install pypdf
-python main.py -f example.pdf -t "Test text"
+pdf-text-miner -f example.pdf -t "Test text"                  # case-sensitive
+pdf-text-miner -f example.pdf -t "test text" -c               # ignore case
+pdf-text-miner -f example.pdf -t "Test text" -o               # save to results.txt
+pdf-text-miner -f example.pdf -t "Test text" --output-path matches.txt
 ```
 
 ## Usage
@@ -41,86 +43,39 @@ python main.py -f example.pdf -t "Test text"
 pdf-text-miner -f FILE -t TEXT [-c] [-o | --output-path PATH]
 ```
 
-| Option | Description |
-| --- | --- |
-| `-f`, `--filename FILE` | PDF file to search (required). |
-| `-t`, `--text TEXT` | Phrase to search for (required). Quote phrases that contain spaces. |
-| `-c`, `--ignore-case` | Ignore letter case. `--capitalisation` is accepted as an older alias. |
-| `-o`, `--output` | Write results to `results.txt` in the current directory instead of printing them. |
-| `--output-path PATH` | Write results to `PATH` instead of printing them (implies `-o`). |
-| `--version` | Print the version and exit. |
-| `-h`, `--help` | Show help and exit. |
+| Option | Meaning |
+|---|---|
+| `-f`, `--filename FILE` | PDF to search (required) |
+| `-t`, `--text TEXT` | phrase to search for (required); quote phrases with spaces |
+| `-c`, `--ignore-case` | compare case-folded text (`"STRASSE"` matches `"Straße"`); `--capitalisation` is an older alias |
+| `-o`, `--output` | write results to `results.txt` in the current directory |
+| `--output-path PATH` | write results to `PATH` (implies `-o`) |
+| `--version` | print the version |
 
-Examples:
+Matching:
 
-```bash
-# Case-sensitive search (default)
-pdf-text-miner -f example.pdf -t "Test text"
+- Literal: no regular expressions and no whole-word matching (`"cat"` matches `"concatenate"`).
+- Each page is searched separately; matches are counted without overlap (`"aa"` occurs twice in `"aaaa"`).
+- Page numbers are physical pages starting at 1, including pages without text.
 
-# Case-insensitive search
-pdf-text-miner -f example.pdf -t "test text" -c
+Output files are UTF-8, in the same format as the printed output, and always
+overwritten, and the command prints `Results saved to PATH.` With no matches the
+file contains `No matches found.` A symbolic link
+keeps pointing at the replaced file and an existing file keeps its permissions.
 
-# Save results to results.txt
-pdf-text-miner -f example.pdf -t "Test text" -o
+| Exit code | Meaning |
+|---|---|
+| 0 | search finished, also with no matches |
+| 1 | input file is empty |
+| 2 | input is not a readable PDF (corrupted, not a PDF, malformed page content) |
+| 3 | input does not exist or is not a file |
+| 4 | PDF is encrypted and needs a password |
+| 5 | reading the input or writing the results failed |
+| 6 | invalid arguments (missing option, empty phrase, output path equal to the input) |
 
-# Save results to a chosen file
-pdf-text-miner -f example.pdf -t "Test text" --output-path matches.txt
-```
+Invalid arguments exited with 2 (the argparse default) in older versions.
 
-### How matching works
-
-- The phrase is matched **literally**: no regular expressions and no whole-word matching
-  (`"cat"` also matches `"concatenate"`).
-- Whitespace is normalized the same way in the PDF text and in the phrase: runs of spaces,
-  tabs and line breaks count as a single space, so a phrase that wraps onto the next line
-  is still found.
-- `--ignore-case` compares case-folded text (`"STRASSE"` matches `"Straße"`).
-- Each page is searched **separately**. A phrase split across two pages is not found.
-- Matches are counted without overlap: `"aa"` occurs twice in `"aaaa"`.
-- Page numbers are the physical page numbers starting at 1, including pages without text.
-
-### Exporting results
-
-With `-o` or `--output-path`, the results are written to the file as UTF-8 text in the
-same format as the printed output, and the command prints `Results saved to PATH.`
-The file is always overwritten. If nothing is found, it contains `No matches found.`,
-so results from an earlier run never remain. The tool refuses to write the results over
-the input PDF.
-
-The results are first written to a temporary file next to the target, which then replaces
-the target only after a complete write. If writing fails (for example, the disk is full),
-the command exits with code 5, the previous file is left unchanged and the temporary file
-is removed. If `PATH` is a symbolic link, the link is kept and the file it points to is
-replaced. An existing file keeps its permissions. A hard link to it is not updated,
-because the target is replaced by a new file.
-
-### Exit codes
-
-| Code | Meaning |
-| --- | --- |
-| 0 | Search finished (also when no matches were found). |
-| 1 | The input file is empty. |
-| 2 | The input file is not a readable PDF (corrupted, not a PDF, or with malformed page content). |
-| 3 | The input file does not exist or is not a file (e.g. a directory). |
-| 4 | The PDF is encrypted and needs a password. |
-| 5 | Reading the input or writing the results failed (e.g. permission denied). |
-| 6 | Invalid arguments (missing option, empty phrase, output path equal to the input). |
-
-Errors are printed to stderr as a single line. Codes 1–3 keep their meaning from earlier
-versions. Invalid arguments used to exit with 2 (the argparse default) and now exit with 6.
-
-## Limitations
-
-- Only the PDF's text layer is searched. Scanned documents and images of text have no
-  text layer and need OCR (for example [OCRmyPDF](https://ocrmypdf.readthedocs.io/)) first.
-- Text is extracted with [pypdf](https://pypdf.readthedocs.io/). The PDF layout (columns,
-  tables, rotated text, unusual fonts) can change the order of the extracted text or the
-  spacing between words, so a phrase that looks continuous on screen may not be found.
-- PDFs protected with a user password are not supported. Files with only an owner password
-  (restricting printing or copying) can be searched. AES-encrypted files need
-  `pip install "pypdf[crypto]"`.
-
-## Using it from Python
+### From Python
 
 ```python
 from pdf_text_miner import find_matches
@@ -129,38 +84,36 @@ for match in find_matches("example.pdf", "Test text", ignore_case=True):
     print(match.page, match.count)
 ```
 
-`search_in_pdf(filename, text, ignore_case=False)` still returns the formatted lines
-(`"Searched text exists N times on page P."`) for backward compatibility.
+`find_matches` raises `ValueError` for an empty phrase and
+`pypdf.errors.PyPdfError` for problems with the document (built-in errors on
+malformed page content are re-raised as `PdfReadError`). `search_in_pdf()`
+still returns the formatted lines. `main(argv)` runs the CLI in-process and
+returns its exit code; it sets the `pypdf` logger to `ERROR` while it runs.
 
-`find_matches` raises `ValueError` only for an empty or whitespace-only phrase. Problems
-with the document are raised as `pypdf.errors.PyPdfError`; built-in errors that pypdf
-raises on malformed page content are re-raised as `pypdf.errors.PdfReadError`.
+## Limitations
 
-`main(argv)` runs the CLI in-process and returns its exit code. It lowers the level of the
-`pypdf` logger to `ERROR` while it runs and restores the previous level afterwards.
+- Only the text layer is searched. Scans need OCR first (for example [OCRmyPDF](https://ocrmypdf.readthedocs.io/)).
+- Layout (columns, tables, rotated text, unusual fonts) can change the order or spacing of the text [pypdf](https://pypdf.readthedocs.io/) extracts, so a phrase that looks continuous may not be found.
+- A phrase split across two pages is not found.
+- PDFs with a user password are not supported. Owner-password-only files work; AES-encrypted ones need `pip install "pypdf[crypto]"`.
+- A hard link to the output file is not updated, because the file is replaced.
 
 ## Development
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
 pip install -e ".[dev]"
-
-pytest -q               # tests generate small PDFs with ReportLab in temporary directories
+pytest -q               # tests
 ruff check .            # lint
-ruff format --check .   # formatting (run `ruff format .` to fix)
+ruff format --check .   # formatting
 ```
 
-Runtime dependencies are listed in `[project.dependencies]` of `pyproject.toml`. The
-development tools (pytest, ReportLab, Ruff) are in the `dev` extra.
+The tests generate small PDFs with ReportLab in temporary directories and run
+the CLI in-process. CI runs Ruff and the tests on Python 3.10 to 3.14, then
+builds the wheel, installs it into a clean virtual environment and runs the
+installed command outside the source directory.
 
-## Continuous Integration
-
-The GitHub Actions workflow in `.github/workflows/pytest.yml` runs Ruff (lint and format
-check) and the test suite on Python 3.10–3.14 for every push and pull request. A separate
-job builds the wheel, installs it into a clean virtual environment and runs the installed
-command outside the source directory.
+Built with an AI coding assistant. I wrote the spec and reviewed every change.
 
 ## License
 
-[MIT](LICENSE)
+MIT, see [LICENSE](LICENSE).
